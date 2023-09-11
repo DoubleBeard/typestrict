@@ -21,16 +21,31 @@ def find_defining_class(cls, attribute) -> type:
     return None
 
 
-def _assume_self_strictness(getattribute_method: MethodType, setattribute_method: MethodType, private_member_prefix: str, protected_member_prefix: str):
+def get_wrappers(
+        getattribute_method: MethodType,
+        setattribute_method: MethodType,
+        private_member_prefix: str,
+        protected_member_prefix: str,
+        enforce_private_variables: bool,
+        enforce_protected_variables: bool,
+        enforce_variable_decleration: bool):
+    
     def getattribute_wrapper(self, name: str) -> Any:
+        # Dunder methods should run as usual
         if name.startswith("__") and name.endswith("__"):
             return getattribute_method(self, name)
 
-        caller_class, caller_method_name = get_caller()
+        # Check if variable is public, private or protected
         is_protected: bool = name.startswith(protected_member_prefix)
         is_private: bool = not is_protected and name.startswith(private_member_prefix)
 
+        is_protected = is_protected and enforce_protected_variables
+        is_private = is_private and enforce_private_variables
+
+        caller_class, caller_method_name = get_caller()
         defining_class = find_defining_class(type(self), name)
+
+        # Variable was not called by a method
         if caller_class is None:
             if is_protected:
                 raise PermissionError(f"Access to protected member \"{name}\" of class \"{defining_class.__name__}\" not allowed.")
@@ -38,6 +53,7 @@ def _assume_self_strictness(getattribute_method: MethodType, setattribute_method
                 raise PermissionError(f"Access to private member \"{name}\" of class \"{defining_class.__name__}\" not allowed.")
             return getattribute_method(self, name)
 
+        # Variable was called by a method, check if the class has access permissions to it
         if is_private and caller_method_name not in dir(defining_class):
             raise PermissionError(f"Access to private member \"{name}\" of class \"{defining_class.__name__}\" not allowed.")
         if is_protected and not issubclass(caller_class, type(self)):
@@ -45,21 +61,37 @@ def _assume_self_strictness(getattribute_method: MethodType, setattribute_method
         return getattribute_method(self, name)
 
     def setattr_wrapper(self, name: str, value: Any) -> Any:
+        # Dunder methods should run as usual
         if name.startswith("__") and name.endswith("__"):
             return setattribute_method(self, name, value)
+    
+        # Prevent setting values for undeclared variables
+        if enforce_variable_decleration:
+            valid_attrs = {attr for cls in self.__class__.mro() for attr in cls.__dict__}
+            valid_annotations = {attr for cls in self.__class__.mro() for attr in getattr(cls, '__annotations__', {})}
+            
+            if name not in valid_attrs and name not in valid_annotations:
+                raise AttributeError(f"Attribute '{name}' is undeclared in class '{self.__class__.__name__}'.")
         
-        caller_class, caller_method_name = get_caller()
+        # Check if variable is public, private or protected
         is_protected: bool = name.startswith(protected_member_prefix)
         is_private: bool = not is_protected and name.startswith(private_member_prefix)
 
+        is_protected = is_protected and enforce_protected_variables
+        is_private = is_private and enforce_private_variables
+
+        caller_class, caller_method_name = get_caller()
         defining_class = find_defining_class(type(self), name)
+
+        # Variable was not called by a method
         if caller_class is None:
             if is_protected:
                 raise PermissionError(f"Access to protected member \"{name}\" of class \"{defining_class.__name__}\" not allowed.")
             if is_private:
                 raise PermissionError(f"Access to private member \"{name}\" of class \"{defining_class.__name__}\" not allowed.")
             return setattribute_method(self, name, value)
-    
+
+        # Variable was called by a method, check if the class has access permissions to it
         if is_private and caller_method_name not in dir(defining_class):
             raise PermissionError(f"Access to private member \"{name}\" not allowed.")
         if is_protected and not issubclass(caller_class, type(self)):
@@ -70,7 +102,15 @@ def _assume_self_strictness(getattribute_method: MethodType, setattribute_method
         
 
 
-def strict_class(enabled: bool = True, private_member_prefix: str = "_", protected_member_prefix: str = "_p_"):
+def strict_class(
+        enabled: bool = True,
+        private_member_prefix: str = "_",
+        protected_member_prefix: str = "_p_",
+        *,
+        enforce_private_variables: bool = True,
+        enforce_protected_variables: bool = True,
+        enforce_variable_decleration: bool = True):
+    
     def class_decorator(cls: type):
         if not enabled:
             return cls
@@ -78,8 +118,14 @@ def strict_class(enabled: bool = True, private_member_prefix: str = "_", protect
         original_getattribute = cls.__getattribute__
         original_setattr = cls.__setattr__
 
-        wrapped_getattribute, wrapped_setattr = _assume_self_strictness(
-            original_getattribute, original_setattr, private_member_prefix, protected_member_prefix
+        wrapped_getattribute, wrapped_setattr = get_wrappers(
+            original_getattribute,
+            original_setattr,
+            private_member_prefix,
+            protected_member_prefix,
+            enforce_private_variables,
+            enforce_protected_variables,
+            enforce_variable_decleration
         )
 
         cls.__getattribute__ = wrapped_getattribute
